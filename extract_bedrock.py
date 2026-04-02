@@ -23,9 +23,26 @@ from engines.rapid import RapidOcrEngine
 AWS_PROFILE = "CVT_AWS_Dev"
 MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
+FORM_FIELDS_HINT = """\
+US birth certificates follow a standard layout with numbered fields:
+- 1A/1B/1C: Child's first name, middle name, last name
+- 2: Sex (MALE/FEMALE)
+- 3A/3B: Birth plurality (single, twin, etc.)
+- 4A/4B: Date of birth, time of birth
+- 5A/5B/5C/5D: Place of birth (hospital, address, city, county)
+- 6A/6B/6C: Father/parent's first name, middle name, last name
+- 7: Father's birthplace (state/country)
+- 8: Father's date of birth
+- 9A/9B/9C: Mother/parent's first name, middle name, last name (birth/maiden name)
+- 10: Mother's birthplace (state/country)
+- 11: Mother's date of birth
+Field numbers and labels vary slightly by state but the structure is consistent."""
+
 EXTRACTION_PROMPT = """\
 Extract birth certificate information from the following OCR text.
 The OCR has errors — words may run together and labels may be garbled.
+
+{form_fields}
 
 Extract:
 - Child: first name, middle name, last name
@@ -34,7 +51,7 @@ Extract:
 - Father: first name, middle name, last name
 - Mother: first name, middle name, last name (birth/maiden name)
 
-"CA" is a US state abbreviation, not a person's name.
+Two-letter abbreviations like CA, NY, TX are US state abbreviations, not names.
 Return null for any field you cannot find.
 Respond with ONLY valid JSON matching this schema, no other text:
 {schema}
@@ -49,6 +66,8 @@ This is an image of a US birth certificate. Extract the following fields:
 - Sex: MALE or FEMALE
 - Father: first name, middle name, last name
 - Mother: first name, middle name, last name (birth/maiden name)
+
+{form_fields}
 
 Return null for any field you cannot find.
 Respond with ONLY valid JSON matching this schema, no other text:
@@ -68,7 +87,7 @@ def get_bedrock_client():
     return session.client("bedrock-runtime")
 
 
-def invoke_bedrock(client, messages: list, max_tokens: int = 1024) -> str:
+def invoke_bedrock(client, messages: list, max_tokens: int = 1024) -> tuple[str, dict]:
     resp = client.invoke_model(
         modelId=MODEL_ID,
         contentType="application/json",
@@ -81,7 +100,7 @@ def invoke_bedrock(client, messages: list, max_tokens: int = 1024) -> str:
         }),
     )
     body = json.loads(resp["body"].read())
-    return body["content"][0]["text"]
+    return body["content"][0]["text"], body.get("usage", {})
 
 
 MAX_IMAGE_BYTES = 4_500_000  # Stay under Bedrock's 5 MB limit
@@ -156,17 +175,17 @@ def _parse_json(raw: str) -> dict:
     return json.loads(text)
 
 
-def extract_full(client, file_path: str) -> dict:
+def extract_full(client, file_path: str) -> tuple[dict, dict]:
     """Send document directly to Claude on Bedrock (multimodal)."""
     content = _image_content_blocks(file_path)
     content.append({
         "type": "text",
-        "text": IMAGE_PROMPT.format(schema=SCHEMA),
+        "text": IMAGE_PROMPT.format(schema=SCHEMA, form_fields=FORM_FIELDS_HINT),
     })
 
     messages = [{"role": "user", "content": content}]
-    raw = invoke_bedrock(client, messages)
-    return _parse_json(raw)
+    raw, usage = invoke_bedrock(client, messages)
+    return _parse_json(raw), usage
 
 
 def extract_hybrid(client, file_path: str) -> dict:
@@ -199,11 +218,11 @@ def extract_hybrid(client, file_path: str) -> dict:
 
     messages = [{
         "role": "user",
-        "content": EXTRACTION_PROMPT.format(schema=SCHEMA, ocr_text=ocr_text),
+        "content": EXTRACTION_PROMPT.format(schema=SCHEMA, ocr_text=ocr_text, form_fields=FORM_FIELDS_HINT),
     }]
 
-    raw = invoke_bedrock(client, messages)
-    return _parse_json(raw)
+    raw, usage = invoke_bedrock(client, messages)
+    return _parse_json(raw), usage
 
 
 def main():
@@ -233,11 +252,19 @@ def main():
     client = get_bedrock_client()
 
     if mode == "full":
-        result = extract_full(client, file_path)
+        result, usage = extract_full(client, file_path)
     else:
-        result = extract_hybrid(client, file_path)
+        result, usage = extract_hybrid(client, file_path)
 
     print(json.dumps(result, indent=2))
+
+    if usage:
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        print(f"\n--- Token Usage ---")
+        print(f"Input:  {input_tokens:,}")
+        print(f"Output: {output_tokens:,}")
+        print(f"Total:  {input_tokens + output_tokens:,}")
 
 
 if __name__ == "__main__":
