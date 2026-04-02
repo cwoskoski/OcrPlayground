@@ -1,6 +1,6 @@
 # OcrPlayground
 
-Local OCR testing playground. Python 3.12+. Everything runs locally — no data sent to external servers.
+Local OCR testing playground. Python 3.12+. Supports fully local processing and cloud-based extraction via Amazon Bedrock.
 
 ## Architecture
 
@@ -10,6 +10,9 @@ Local OCR testing playground. Python 3.12+. Everything runs locally — no data 
   - `engines/tesseract.py` — Tesseract OCR. Better word segmentation but noisier output on forms with watermarks/backgrounds.
 - `ocr.py` — CLI entry point for OCR. Uses the engine abstraction; swap backends by changing one import and one line.
 - `extract.py` — Structured data extraction from OCR text using a local LLM (Qwen3:14B via Ollama). Currently extracts birth certificate fields (names, DOB, sex, parent names) into JSON.
+- `extract_bedrock.py` — Cloud-based extraction via Amazon Bedrock + Claude. Two modes:
+  - `full` — sends the image directly to Claude (multimodal, skips OCR entirely)
+  - `hybrid` — OCR locally with RapidOCR, sends text to Claude for extraction
 
 ## OCR Engine Notes
 
@@ -30,6 +33,15 @@ Local OCR testing playground. Python 3.12+. Everything runs locally — no data 
   - `/no_think` disables Qwen3's reasoning mode (faster but less accurate).
   - Explicitly telling the LLM that "CA" is a state abbreviation prevents it from being used as a name.
   - Describing the label-then-value line pattern of the form helps the model parse the layout.
+
+## LLM Extraction (Amazon Bedrock)
+
+- `extract_bedrock.py` uses Amazon Bedrock with Claude models via boto3.
+- AWS profile: `CVT_AWS_Dev` (SSO login required: `aws sso login --profile CVT_AWS_Dev`).
+- Default model: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (cheapest for dev). Upgrade to Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) once the Anthropic use case form is submitted in the Bedrock console.
+- Full mode sends the raw image (base64) — best accuracy since Claude reads the document directly.
+- Hybrid mode runs RapidOCR locally first, sends only extracted text to Bedrock — minimizes data sent to cloud.
+- This is a HIPAA-covered use case. Bedrock with a BAA is required for production. The dev account is for testing only.
 
 ## Conventions
 

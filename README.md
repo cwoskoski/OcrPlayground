@@ -1,6 +1,6 @@
 # OcrPlayground
 
-Local OCR testing playground with a pluggable engine abstraction and LLM-powered structured data extraction. Everything runs locally — no data is sent to external servers.
+Local OCR testing playground with a pluggable engine abstraction and LLM-powered structured data extraction. Supports both fully local processing (Ollama) and cloud-based extraction (Amazon Bedrock).
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ Supported formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tiff`, `.tif`
 
 Extracted text is printed to the console and saved to the `output/` directory as `.txt` files.
 
-### Extract structured data from OCR output
+### Extract structured data (local — Ollama)
 
 Requires Ollama running with Qwen3:14B:
 
@@ -46,14 +46,29 @@ ollama serve &
 python extract.py output/birth_certificate.txt
 ```
 
-Returns structured JSON with fields like child name, date of birth, sex, and parent names.
+### Extract structured data (cloud — Amazon Bedrock)
+
+Requires AWS credentials with Bedrock access and Anthropic use case form submitted:
+
+```bash
+aws sso login --profile CVT_AWS_Dev
+
+# Full mode — send image directly to Claude (multimodal, skips OCR)
+python extract_bedrock.py full images/birth_cert.png
+
+# Hybrid mode — OCR locally, send extracted text to Claude
+python extract_bedrock.py hybrid images/birth_cert.png
+```
+
+Both modes return structured JSON with child name, date of birth, sex, and parent names.
 
 ## Project Structure
 
 ```
 ocr.py              # CLI entry point for OCR
 ocr_engine.py       # Abstract OcrEngine interface and OcrResult dataclass
-extract.py          # LLM-powered structured data extraction (Ollama + Qwen3)
+extract.py          # Local LLM extraction (Ollama + Qwen3)
+extract_bedrock.py  # Cloud LLM extraction (Amazon Bedrock + Claude)
 engines/
   rapid.py          # RapidOCR implementation (default)
   tesseract.py      # Tesseract implementation

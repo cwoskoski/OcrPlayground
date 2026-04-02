@@ -4,3 +4,4 @@ pytesseract
 Pillow
 ollama
 pydantic
+boto3
