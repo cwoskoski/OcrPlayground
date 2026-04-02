@@ -1,16 +1,20 @@
 """Extract structured data from birth certificates using Amazon Bedrock.
 
 Two modes:
-  full   — Send the image directly to Claude (multimodal, skips OCR)
+  full   — Send the document directly to Claude (multimodal, skips OCR)
   hybrid — OCR locally with RapidOCR, then send text to Claude for extraction
+
+Supports both images (.png, .jpg, etc.) and PDFs.
 """
 
 import base64
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import boto3
+from pdf2image import convert_from_path
 
 from engines.rapid import RapidOcrEngine
 
@@ -78,49 +82,87 @@ def invoke_bedrock(client, messages: list, max_tokens: int = 1024) -> str:
     return body["content"][0]["text"]
 
 
-def extract_full(client, image_path: str) -> dict:
-    """Send image directly to Claude on Bedrock (multimodal)."""
-    img_bytes = Path(image_path).read_bytes()
-    media_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
-    b64_image = base64.b64encode(img_bytes).decode("utf-8")
+def _is_pdf(file_path: str) -> bool:
+    return file_path.lower().endswith(".pdf")
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": b64_image,
-                },
-            },
-            {
-                "type": "text",
-                "text": IMAGE_PROMPT.format(schema=SCHEMA),
-            },
-        ],
-    }]
 
+def _pdf_to_images(pdf_path: str) -> list[tuple[bytes, str]]:
+    """Convert PDF pages to PNG images. Returns list of (bytes, media_type)."""
+    pages = convert_from_path(pdf_path, dpi=300)
+    result = []
+    for page in pages:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            page.save(tmp.name, "PNG")
+            result.append((Path(tmp.name).read_bytes(), "image/png"))
+    return result
+
+
+def _image_content_blocks(file_path: str) -> list[dict]:
+    """Build image content blocks for Bedrock messages, handling PDFs."""
+    if _is_pdf(file_path):
+        pages = _pdf_to_images(file_path)
+    else:
+        media_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
+        pages = [(Path(file_path).read_bytes(), media_type)]
+
+    blocks = []
+    for img_bytes, media_type in pages:
+        b64_image = base64.b64encode(img_bytes).decode("utf-8")
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": b64_image,
+            },
+        })
+    return blocks
+
+
+def extract_full(client, file_path: str) -> dict:
+    """Send document directly to Claude on Bedrock (multimodal)."""
+    content = _image_content_blocks(file_path)
+    content.append({
+        "type": "text",
+        "text": IMAGE_PROMPT.format(schema=SCHEMA),
+    })
+
+    messages = [{"role": "user", "content": content}]
     raw = invoke_bedrock(client, messages)
     return json.loads(raw)
 
 
-def extract_hybrid(client, image_path: str) -> dict:
+def extract_hybrid(client, file_path: str) -> dict:
     """OCR locally, then send text to Claude on Bedrock for extraction."""
     engine = RapidOcrEngine()
-    ocr_result = engine.recognize(image_path)
 
-    if not ocr_result.text:
+    if _is_pdf(file_path):
+        pages = convert_from_path(file_path, dpi=300)
+        all_text = []
+        for page in pages:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                page.save(tmp.name, "PNG")
+                result = engine.recognize(tmp.name)
+                if result.text:
+                    all_text.append(result.text)
+        ocr_text = "\n".join(all_text)
+        confidence = None
+    else:
+        ocr_result = engine.recognize(file_path)
+        ocr_text = ocr_result.text
+        confidence = ocr_result.confidence
+
+    if not ocr_text:
         print("(no text detected by OCR)")
         return {}
 
-    print(f"OCR confidence: {ocr_result.confidence:.2f}")
-    print(f"OCR text length: {len(ocr_result.text)} chars\n")
+    if confidence is not None:
+        print(f"OCR confidence: {confidence:.2f}")
+    print(f"OCR text length: {len(ocr_text)} chars\n")
 
     messages = [{
         "role": "user",
-        "content": EXTRACTION_PROMPT.format(schema=SCHEMA, ocr_text=ocr_result.text),
+        "content": EXTRACTION_PROMPT.format(schema=SCHEMA, ocr_text=ocr_text),
     }]
 
     raw = invoke_bedrock(client, messages)
@@ -129,33 +171,34 @@ def extract_hybrid(client, image_path: str) -> dict:
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python extract_bedrock.py <mode> <image_path>")
+        print("Usage: python extract_bedrock.py <mode> <file_path>")
         print("  Modes:")
-        print("    full   — Send image directly to Bedrock (multimodal)")
+        print("    full   — Send document directly to Bedrock (multimodal)")
         print("    hybrid — OCR locally, then extract via Bedrock")
+        print("  Supports: images (.png, .jpg, etc.) and PDFs (.pdf)")
         sys.exit(1)
 
     mode = sys.argv[1]
-    image_path = sys.argv[2]
+    file_path = sys.argv[2]
 
     if mode not in ("full", "hybrid"):
         print(f"Unknown mode: {mode}. Use 'full' or 'hybrid'.")
         sys.exit(1)
 
-    if not Path(image_path).is_file():
-        print(f"File not found: {image_path}")
+    if not Path(file_path).is_file():
+        print(f"File not found: {file_path}")
         sys.exit(1)
 
     print(f"Mode: {mode}")
-    print(f"Image: {image_path}")
+    print(f"File: {file_path}")
     print(f"Model: {MODEL_ID}\n")
 
     client = get_bedrock_client()
 
     if mode == "full":
-        result = extract_full(client, image_path)
+        result = extract_full(client, file_path)
     else:
-        result = extract_hybrid(client, image_path)
+        result = extract_hybrid(client, file_path)
 
     print(json.dumps(result, indent=2))
 

@@ -5,3 +5,4 @@ Pillow
 ollama
 pydantic
 boto3
+pdf2image
