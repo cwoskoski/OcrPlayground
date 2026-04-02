@@ -1,0 +1,6 @@
+rapidocr
+onnxruntime
+pytesseract
+Pillow
+ollama
+pydantic
