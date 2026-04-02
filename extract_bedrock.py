@@ -8,6 +8,7 @@ Supports both images (.png, .jpg, etc.) and PDFs.
 """
 
 import base64
+import io
 import json
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import boto3
 from pdf2image import convert_from_path
+from PIL import Image
 
 from engines.rapid import RapidOcrEngine
 
@@ -82,28 +84,52 @@ def invoke_bedrock(client, messages: list, max_tokens: int = 1024) -> str:
     return body["content"][0]["text"]
 
 
+MAX_IMAGE_BYTES = 4_500_000  # Stay under Bedrock's 5 MB limit
+
+
 def _is_pdf(file_path: str) -> bool:
     return file_path.lower().endswith(".pdf")
 
 
-def _pdf_to_images(pdf_path: str) -> list[tuple[bytes, str]]:
-    """Convert PDF pages to PNG images. Returns list of (bytes, media_type)."""
-    pages = convert_from_path(pdf_path, dpi=300)
+def _compress_image(img: Image.Image) -> tuple[bytes, str]:
+    """Compress an image to JPEG under the Bedrock size limit."""
+    for quality in (85, 70, 50, 30):
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=quality)
+        data = buf.getvalue()
+        if len(data) <= MAX_IMAGE_BYTES:
+            return data, "image/jpeg"
+    # Last resort: resize to half
+    img = img.reduce(2)
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=50)
+    return buf.getvalue(), "image/jpeg"
+
+
+def _load_image_bytes(file_path: str) -> list[tuple[bytes, str]]:
+    """Load image(s) from a file path, compressing if needed. Handles PDFs."""
+    if _is_pdf(file_path):
+        pil_images = convert_from_path(file_path, dpi=200)
+    else:
+        pil_images = [Image.open(file_path)]
+
     result = []
-    for page in pages:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            page.save(tmp.name, "PNG")
-            result.append((Path(tmp.name).read_bytes(), "image/png"))
+    for img in pil_images:
+        # Try original format first
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        raw_bytes = buf.getvalue()
+
+        if len(raw_bytes) <= MAX_IMAGE_BYTES:
+            result.append((raw_bytes, "image/jpeg"))
+        else:
+            result.append(_compress_image(img))
     return result
 
 
 def _image_content_blocks(file_path: str) -> list[dict]:
     """Build image content blocks for Bedrock messages, handling PDFs."""
-    if _is_pdf(file_path):
-        pages = _pdf_to_images(file_path)
-    else:
-        media_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
-        pages = [(Path(file_path).read_bytes(), media_type)]
+    pages = _load_image_bytes(file_path)
 
     blocks = []
     for img_bytes, media_type in pages:
@@ -119,6 +145,17 @@ def _image_content_blocks(file_path: str) -> list[dict]:
     return blocks
 
 
+def _parse_json(raw: str) -> dict:
+    """Parse JSON from LLM response, handling markdown code blocks."""
+    text = raw.strip()
+    if text.startswith("```"):
+        # Strip markdown code fences
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+    return json.loads(text)
+
+
 def extract_full(client, file_path: str) -> dict:
     """Send document directly to Claude on Bedrock (multimodal)."""
     content = _image_content_blocks(file_path)
@@ -129,7 +166,7 @@ def extract_full(client, file_path: str) -> dict:
 
     messages = [{"role": "user", "content": content}]
     raw = invoke_bedrock(client, messages)
-    return json.loads(raw)
+    return _parse_json(raw)
 
 
 def extract_hybrid(client, file_path: str) -> dict:
@@ -137,7 +174,7 @@ def extract_hybrid(client, file_path: str) -> dict:
     engine = RapidOcrEngine()
 
     if _is_pdf(file_path):
-        pages = convert_from_path(file_path, dpi=300)
+        pages = convert_from_path(file_path, dpi=200)
         all_text = []
         for page in pages:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -166,7 +203,7 @@ def extract_hybrid(client, file_path: str) -> dict:
     }]
 
     raw = invoke_bedrock(client, messages)
-    return json.loads(raw)
+    return _parse_json(raw)
 
 
 def main():
