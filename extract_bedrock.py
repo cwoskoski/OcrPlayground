@@ -36,7 +36,9 @@ US birth certificates follow a standard layout with numbered fields:
 - 9A/9B/9C: Mother/parent's first name, middle name, last name (birth/maiden name)
 - 10: Mother's birthplace (state/country)
 - 11: Mother's date of birth
-Field numbers and labels vary slightly by state but the structure is consistent."""
+Field numbers and labels vary slightly by state but the structure is consistent.
+Each name field may contain one or more names (e.g. middle name could be "SHEA MARIE", \
+last name could be "DE LA CRUZ"). Preserve the full value as written."""
 
 EXTRACTION_PROMPT = """\
 Extract birth certificate information from the following OCR text.
