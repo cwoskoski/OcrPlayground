@@ -8,11 +8,17 @@ Local OCR testing playground. Python 3.12+. Supports fully local processing and 
 - `engines/` — Concrete engine implementations:
   - `engines/rapid.py` — RapidOCR (default). Best accuracy on structured documents. Uses `return_word_box=True` and `unclip_ratio=1.2` to improve word separation.
   - `engines/tesseract.py` — Tesseract OCR. Better word segmentation but noisier output on forms with watermarks/backgrounds.
-- `ocr.py` — CLI entry point for OCR. Uses the engine abstraction; swap backends by changing one import and one line.
+- `ocr.py` — CLI entry point for OCR. Supports images and PDFs. Uses the engine abstraction; swap backends by changing one import and one line.
 - `extract.py` — Structured data extraction from OCR text using a local LLM (Qwen3:14B via Ollama). Currently extracts birth certificate fields (names, DOB, sex, parent names) into JSON.
-- `extract_bedrock.py` — Cloud-based extraction via Amazon Bedrock + Claude. Two modes:
-  - `full` — sends the image directly to Claude (multimodal, skips OCR entirely)
-  - `hybrid` — OCR locally with RapidOCR, sends text to Claude for extraction
+- `extract_bedrock.py` — Cloud-based extraction via Amazon Bedrock + Claude. Supports images and PDFs. Two modes:
+  - `full` — sends the document directly to Claude (multimodal, skips OCR entirely). Best accuracy.
+  - `hybrid` — OCR locally with RapidOCR, sends text to Claude for extraction. Fewer tokens, minimizes data sent to cloud.
+
+## Supported Formats
+
+- Images: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tiff`, `.tif`
+- PDFs: `.pdf` — converted to images via `pdf2image` (requires `poppler-utils` system package)
+- For Bedrock full mode, images are auto-compressed to JPEG to stay under the 5 MB API limit.
 
 ## OCR Engine Notes
 
@@ -23,7 +29,7 @@ Local OCR testing playground. Python 3.12+. Supports fully local processing and 
 - Tesseract requires system package: `sudo apt install tesseract-ocr tesseract-ocr-eng`
 - RapidOCR requires `onnxruntime` as a runtime dependency (not pulled in automatically by pip).
 
-## LLM Extraction (Ollama)
+## LLM Extraction (Ollama — Local)
 
 - Uses Ollama to run Qwen3:14B locally for structured data extraction from OCR text.
 - Ollama is installed but the systemd service is **disabled by default** to save resources. Start manually with `ollama serve &` when needed.
@@ -34,14 +40,23 @@ Local OCR testing playground. Python 3.12+. Supports fully local processing and 
   - Explicitly telling the LLM that "CA" is a state abbreviation prevents it from being used as a name.
   - Describing the label-then-value line pattern of the form helps the model parse the layout.
 
-## LLM Extraction (Amazon Bedrock)
+## LLM Extraction (Amazon Bedrock — Cloud)
 
 - `extract_bedrock.py` uses Amazon Bedrock with Claude models via boto3.
 - AWS profile: `CVT_AWS_Dev` (SSO login required: `aws sso login --profile CVT_AWS_Dev`).
 - Default model: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (cheapest for dev). Upgrade to Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) once the Anthropic use case form is submitted in the Bedrock console.
-- Full mode sends the raw image (base64) — best accuracy since Claude reads the document directly.
+- Full mode sends the document as image(s) — best accuracy since Claude reads the document directly.
 - Hybrid mode runs RapidOCR locally first, sends only extracted text to Bedrock — minimizes data sent to cloud.
+- Token usage is displayed after each extraction for cost tracking.
+- Cost per document: ~$0.002 with Haiku 4.5 (~2,000 tokens per extraction).
 - This is a HIPAA-covered use case. Bedrock with a BAA is required for production. The dev account is for testing only.
+
+## Prompt Engineering Notes
+
+- Prompts include a `FORM_FIELDS_HINT` describing standard US birth certificate field numbering (1A-11) which significantly improves extraction accuracy.
+- Telling the model that name fields can contain multiple names (e.g. "SHEA MARIE") prevents it from splitting compound names.
+- Two-letter state abbreviations (CA, NY, TX) must be explicitly called out as non-name values.
+- Bedrock prompts request ONLY valid JSON — but responses sometimes come wrapped in markdown code fences, so `_parse_json()` strips those.
 
 ## Conventions
 
@@ -55,10 +70,15 @@ Local OCR testing playground. Python 3.12+. Supports fully local processing and 
 ```bash
 source .venv/bin/activate
 
-# OCR an image
-python ocr.py <image_or_directory>
+# OCR an image or PDF
+python ocr.py <image_or_pdf_or_directory>
 
 # Extract structured data from OCR output (requires ollama serve running)
 ollama serve &
 python extract.py output/<file>.txt
+
+# Extract via Bedrock (requires AWS SSO login)
+aws sso login --profile CVT_AWS_Dev
+python extract_bedrock.py full <image_or_pdf>      # multimodal
+python extract_bedrock.py hybrid <image_or_pdf>     # OCR locally + Bedrock
 ```
